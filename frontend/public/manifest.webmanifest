@@ -1,0 +1,17 @@
+{
+  "name": "AI Student OS",
+  "short_name": "Student OS",
+  "description": "A focused workspace for students.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f4f5ef",
+  "theme_color": "#aa3bff",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -1,16 +1,17 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@source "../../ai-student-os.jsx";
 
 html,
 body,
 #root {
   min-height: 100%;
   margin: 0;
+  width: 100%;
 }
 
 body {
   background: #f4f5ef;
+  overflow-x: hidden;
 }
 :root {
   --text: #6b6375;
@@ -31,7 +32,7 @@ body {
 
   font: 18px/145% var(--sans);
   letter-spacing: 0.18px;
-  color-scheme: light dark;
+  color-scheme: light;
   color: var(--text);
   background: var(--bg);
   font-synthesis: none;
@@ -78,6 +79,100 @@ body {
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
+}
+
+.app-stage {
+  min-height: 100svh;
+}
+
+.app-frame {
+  min-height: 0;
+}
+
+.app-safe-top {
+  height: 34px;
+  flex: 0 0 34px;
+}
+
+.auth-primary,
+.auth-secondary {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  text-align: center;
+}
+
+.auth-secondary {
+  min-height: 44px;
+  margin-top: 12px !important;
+}
+
+button,
+input,
+textarea {
+  touch-action: manipulation;
+}
+
+@media (max-width: 480px) {
+  html,
+  body,
+  #root {
+    min-height: 100svh;
+  }
+
+  .app-stage {
+    min-height: 100svh;
+    padding: 0;
+    align-items: stretch;
+  }
+
+  .app-frame {
+    width: 100%;
+    max-width: none !important;
+    height: 100svh !important;
+    min-height: 100svh;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+  }
+
+  .app-safe-top {
+    height: max(20px, env(safe-area-inset-top));
+    flex-basis: max(20px, env(safe-area-inset-top));
+  }
+
+  .app-content {
+    padding-inline: 16px !important;
+    padding-bottom: max(16px, env(safe-area-inset-bottom)) !important;
+  }
+
+  .auth-screen {
+    padding-inline: 20px !important;
+  }
+
+  .app-frame > .flex.items-center.justify-around {
+    height: max(72px, calc(72px + env(safe-area-inset-bottom))) !important;
+    padding-bottom: env(safe-area-inset-bottom) !important;
+  }
+
+  input,
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+
+  button {
+    min-height: 44px;
+  }
+}
+
+@media (max-width: 360px) {
+  .app-content {
+    padding-inline: 12px !important;
+  }
+
+  .app-frame > .flex.items-center.justify-around span {
+    font-size: 9px !important;
+  }
 }
 
 h1,

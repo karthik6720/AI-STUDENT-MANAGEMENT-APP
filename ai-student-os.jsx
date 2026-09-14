@@ -49,7 +49,62 @@ const colors = {
   brickSoft: "#F5E4DD",
 };
 
+// The original prototype used a preview-only `window.storage` API. Use it when
+// present, but persist accounts and sessions in the browser everywhere else.
+const appStorage = {
+  async get(key) {
+    if (window.storage?.get) return window.storage.get(key, false);
+    const value = window.localStorage.getItem(key);
+    return value === null ? null : { value };
+  },
+  async set(key, value) {
+    if (window.storage?.set) return window.storage.set(key, value, false);
+    window.localStorage.setItem(key, value);
+  },
+  async delete(key) {
+    if (window.storage?.delete) return window.storage.delete(key, false);
+    window.localStorage.removeItem(key);
+  },
+};
+
+const accountStorageKey = (email) => `account:${encodeURIComponent(email.trim().toLowerCase())}`;
+const planStorageKey = (email) => `plan:${encodeURIComponent(email.trim().toLowerCase())}`;
+const studyAttendanceStorageKey = (email) => `study-attendance:${encodeURIComponent(email.trim().toLowerCase())}`;
+const API_BASE_URL = `${window.location.protocol}//${window.location.hostname}:5000`;
+
+function localDateKey() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
+
+function recentDateKeys(days = 7) {
+  return Array.from({ length: days }, (_, index) => {
+    const date = new Date();
+    date.setDate(date.getDate() - index);
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  });
+}
+
+function formatDateLabel(dateKey) {
+  const [year, month, day] = dateKey.split("-").map(Number);
+  return new Date(year, month - 1, day).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+}
+
+function getTopicPerformance(plan) {
+  return Object.entries(plan?.lastTestResults || {})
+    .map(([topic, result]) => ({ topic, percent: result.total ? Math.round((result.correct / result.total) * 100) : 0 }))
+    .sort((a, b) => a.percent - b.percent);
+}
+
+const saveAccountRecord = (account) => {
+  if (!account?.email) return Promise.resolve();
+  return appStorage
+    .set(accountStorageKey(account.email), JSON.stringify(account))
+    .catch((e) => console.error("Storage error:", e));
+};
+
 const student = { name: "Aisha", streak: 12, overallMastery: 68 };
+const defaultAccounts = [{ name: student.name, email: "aisha.k@student.edu", password: "student123" }];
 
 const subjects = [
   {
@@ -123,24 +178,6 @@ const assignments = [
   { id: 3, title: "ER diagram assignment", subject: "DBMS", due: "Due in 3 days", status: "pending" },
   { id: 4, title: "Subnetting worksheet", subject: "Computer Networks", due: "Submitted", status: "submitted" },
 ];
-
-const attendance = [
-  { id: "ds", name: "Data Structures", attended: 34, total: 38, required: 75 },
-  { id: "os", name: "Operating Systems", attended: 24, total: 36, required: 75 },
-  { id: "dbms", name: "DBMS", attended: 30, total: 34, required: 75 },
-  { id: "cn", name: "Computer Networks", attended: 20, total: 32, required: 75 },
-];
-
-function attendancePrediction(a) {
-  const pct = (a.attended / a.total) * 100;
-  const req = a.required / 100;
-  if (pct >= a.required) {
-    const safeSkips = Math.floor((a.attended * 100) / a.required - a.total);
-    return { pct, safe: true, message: `You can miss ${Math.max(safeSkips, 0)} more class${safeSkips === 1 ? "" : "es"} and stay above ${a.required}%.` };
-  }
-  const needed = Math.ceil((req * a.total - a.attended) / (1 - req));
-  return { pct, safe: false, message: `Attend the next ${needed} class${needed === 1 ? "" : "es"} in a row to reach ${a.required}%.` };
-}
 
 const cgpaHistory = [
   { sem: "Sem 1", gpa: 7.6 },
@@ -248,24 +285,33 @@ function TrendBadge({ trend }) {
   );
 }
 
-function reminders() {
+function reminders(plan) {
   const items = [];
-  assignments
+  const sourceAssignments = plan?.assignments?.length ? plan.assignments : assignments;
+  sourceAssignments
     .filter((a) => a.status === "overdue")
     .forEach((a) => items.push({ icon: AlertTriangle, color: colors.brick, bg: colors.brickSoft, text: `${a.title} is overdue` }));
-  assignments
+  sourceAssignments
     .filter((a) => a.due === "Due today" && a.status !== "submitted")
     .forEach((a) => items.push({ icon: ListChecks, color: colors.ochre, bg: colors.ochreSoft, text: `${a.title} is due today` }));
-  attendance
-    .filter((a) => !attendancePrediction(a).safe)
-    .forEach((a) => items.push({ icon: Users, color: colors.brick, bg: colors.brickSoft, text: `${a.name} attendance is below ${a.required}%` }));
-  items.push({ icon: Flame, color: colors.ochre, bg: colors.ochreSoft, text: `${student.streak}-day streak — keep it going` });
+  if (plan) {
+    const nextAssignment = sourceAssignments.find((a) => a.status !== "submitted");
+    items.push({
+      icon: FileText,
+      color: colors.emerald,
+      bg: colors.emeraldSoft,
+      text: nextAssignment ? `Next: ${nextAssignment.title}` : "All uploaded-file assignments are complete",
+    });
+  } else {
+    items.push({ icon: Flame, color: colors.ochre, bg: colors.ochreSoft, text: `${student.streak}-day streak — keep it going` });
+  }
   return items;
 }
 
-function ProductivityOverview({ goToTab }) {
-  const doneToday = dailyTasksSeed.filter((t) => t.done).length;
-  const items = reminders();
+function ProductivityOverview({ goToTab, plan }) {
+  const tasks = plan?.dailyTasks?.length ? plan.dailyTasks : dailyTasksSeed;
+  const doneToday = tasks.filter((t) => t.done).length;
+  const items = reminders(plan);
 
   const actions = [
     { id: "planner", label: "Planner", icon: Calendar },
@@ -300,13 +346,13 @@ function ProductivityOverview({ goToTab }) {
             Today's tasks
           </span>
           <span className="text-xs" style={{ color: colors.inkSoft }}>
-            {doneToday}/{dailyTasksSeed.length}
+            {doneToday}/{tasks.length}
           </span>
         </div>
         <div className="rounded-full h-1.5" style={{ background: colors.border }}>
           <div
             className="h-1.5 rounded-full"
-            style={{ width: `${(doneToday / dailyTasksSeed.length) * 100}%`, background: colors.emerald }}
+            style={{ width: `${(doneToday / tasks.length) * 100}%`, background: colors.emerald }}
           />
         </div>
       </Card>
@@ -341,7 +387,7 @@ function ProductivityOverview({ goToTab }) {
   );
 }
 
-function HomeScreen({ goToSubject, goToTab, userName }) {
+function HomeScreen({ goToSubject, goToTab, userName, plan }) {
   const hour = new Date().getHours();
   const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
   const firstName = (userName || student.name).split(" ")[0];
@@ -361,35 +407,107 @@ function HomeScreen({ goToSubject, goToTab, userName }) {
           className="flex items-center gap-1 px-2.5 py-1.5 rounded-full text-sm"
           style={{ background: colors.ochreSoft, color: colors.ochre, fontWeight: 600 }}
         >
-          <Flame size={15} />
-          {student.streak}
+          {plan ? `${plan.topics.length} topics` : <><Flame size={15} />{student.streak}</>}
         </div>
       </div>
 
-      <Card>
-        <div className="flex items-center gap-5">
-          <div className="relative" style={{ width: 132, height: 132 }}>
-            <Ring value={student.overallMastery} />
-            <div className="absolute inset-0 flex flex-col items-center justify-center">
-              <span style={{ fontFamily: "Fraunces, serif", fontSize: 30, color: colors.ink, fontWeight: 600 }}>
-                {student.overallMastery}%
-              </span>
-              <span className="text-xs" style={{ color: colors.inkSoft }}>
-                mastery
-              </span>
+      {plan ? (
+        <Card>
+          <div className="flex items-center gap-4">
+            <div className="relative shrink-0" style={{ width: 112, height: 112 }}>
+              {(() => {
+                const quizLength = (plan.quiz || []).length;
+                const hasTest = typeof plan.lastTestScore === "number" && quizLength > 0;
+                const taskCount = (plan.dailyTasks || []).length;
+                const completedTasks = (plan.dailyTasks || []).filter((task) => task.done).length;
+                const value = hasTest ? Math.round((plan.lastTestScore / quizLength) * 100) : taskCount ? Math.round((completedTasks / taskCount) * 100) : 0;
+                return (
+                  <>
+                    <Ring value={value} size={112} stroke={10} />
+                    <div className="absolute inset-0 flex flex-col items-center justify-center">
+                      <span style={{ fontFamily: "Fraunces, serif", fontSize: 27, color: colors.ink, fontWeight: 600 }}>{value}%</span>
+                      <span className="text-xs" style={{ color: colors.inkSoft }}>{hasTest ? "mastery" : "started"}</span>
+                    </div>
+                  </>
+                );
+              })()}
+            </div>
+            <div className="min-w-0">
+              <p className="text-sm" style={{ color: colors.ink, fontWeight: 600 }}>Your live study plan</p>
+              <p className="text-xs mt-1" style={{ color: colors.inkSoft, lineHeight: 1.5 }}>
+                {plan.topics.length} {plan.topics.length === 1 ? "topic" : "topics"} from {plan.files?.length || 1} uploaded file{plan.files?.length === 1 ? "" : "s"}
+              </p>
+              <p className="text-xs mt-2" style={{ color: colors.inkSoft }}>
+                {typeof plan.lastTestScore === "number" ? "Based on your latest file test." : "Complete tasks or take the test to build mastery."}
+              </p>
             </div>
           </div>
-          <div className="flex-1">
-            <p className="text-sm" style={{ color: colors.inkSoft }}>
-              Across {subjects.length} subjects you're tracking this term. Two topics need attention before your next test.
-            </p>
+        </Card>
+      ) : (
+        <Card>
+          <div className="flex items-center gap-5">
+            <div className="relative" style={{ width: 132, height: 132 }}>
+              <Ring value={student.overallMastery} />
+              <div className="absolute inset-0 flex flex-col items-center justify-center">
+                <span style={{ fontFamily: "Fraunces, serif", fontSize: 30, color: colors.ink, fontWeight: 600 }}>{student.overallMastery}%</span>
+                <span className="text-xs" style={{ color: colors.inkSoft }}>mastery</span>
+              </div>
+            </div>
+            <div className="flex-1">
+              <p className="text-sm" style={{ color: colors.inkSoft }}>Across {subjects.length} subjects you're tracking this term. Two topics need attention before your next test.</p>
+            </div>
+          </div>
+        </Card>
+      )}
+
+      <ProductivityOverview goToTab={goToTab} plan={plan} />
+
+      {plan?.lastTestResults && (
+        <Card>
+          <div className="flex items-center justify-between mb-3">
+            <SectionLabel>Weak topics from latest test</SectionLabel>
+            <span className="text-xs" style={{ color: colors.inkSoft }}>Live</span>
+          </div>
+          <div className="flex flex-col gap-3">
+            {getTopicPerformance(plan).slice(0, 3).map(({ topic, percent }) => (
+              <div key={topic}>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs truncate pr-2" style={{ color: colors.ink }}>{topic}</span>
+                  <span className="text-xs" style={{ color: percent < 60 ? colors.brick : colors.emerald, fontWeight: 600 }}>{percent}%</span>
+                </div>
+                <div className="rounded-full h-2" style={{ background: colors.border }}>
+                  <div className="h-2 rounded-full" style={{ width: `${percent}%`, background: percent < 60 ? colors.brick : colors.emerald, transition: "width 300ms ease" }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {plan?.topics?.length > 0 && (
+        <div>
+          <SectionLabel>Topics from your files</SectionLabel>
+          <div className="flex flex-col gap-2">
+            {plan.topics.slice(0, 6).map((topic) => (
+              <Card key={topic}>
+                <div className="flex items-center gap-3">
+                  <div
+                    className="flex items-center justify-center rounded-full shrink-0"
+                    style={{ width: 30, height: 30, background: colors.emeraldSoft }}
+                  >
+                    <FileText size={14} color={colors.emerald} />
+                  </div>
+                  <p className="text-sm" style={{ color: colors.ink, fontWeight: 500 }}>
+                    {topic}
+                  </p>
+                </div>
+              </Card>
+            ))}
           </div>
         </div>
-      </Card>
+      )}
 
-      <ProductivityOverview goToTab={goToTab} />
-
-      {focusTopic && (
+      {!plan && focusTopic && (
         <div>
           <SectionLabel>Today's focus</SectionLabel>
           <Card style={{ borderColor: colors.emerald, borderWidth: 1.5 }} onClick={() => goToSubject(focusTopic.subjectId)}>
@@ -417,7 +535,7 @@ function HomeScreen({ goToSubject, goToTab, userName }) {
         </div>
       )}
 
-      <div>
+      {!plan && <div>
         <div className="flex items-center justify-between mb-2">
           <SectionLabel>Weak topics identified</SectionLabel>
           <span className="text-xs" style={{ color: colors.inkSoft }}>
@@ -451,9 +569,9 @@ function HomeScreen({ goToSubject, goToTab, userName }) {
             </Card>
           ))}
         </div>
-      </div>
+      </div>}
 
-      <div>
+      {!plan && <div>
         <SectionLabel>Continue learning</SectionLabel>
         <div className="flex flex-col gap-2">
           {subjects.map((s) => (
@@ -478,12 +596,186 @@ function HomeScreen({ goToSubject, goToTab, userName }) {
             </Card>
           ))}
         </div>
-      </div>
+      </div>}
     </div>
   );
 }
 
-function SubjectsList({ goToSubject }) {
+function TopicStudyChat({ topic, context }) {
+  const [question, setQuestion] = useState("");
+  const [messages, setMessages] = useState([]);
+  const [thinking, setThinking] = useState(false);
+
+  const ask = async () => {
+    const message = question.trim();
+    if (!message || thinking) return;
+    setQuestion("");
+    setMessages((current) => [...current, { role: "user", text: message }]);
+    setThinking(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/study-chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ topic, context, message }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "The study assistant is unavailable.");
+      setMessages((current) => [...current, { role: "assistant", text: result.answer }]);
+    } catch (error) {
+      setMessages((current) => [...current, { role: "assistant", text: error.message }]);
+    } finally {
+      setThinking(false);
+    }
+  };
+
+  return (
+    <Card>
+      <div className="flex items-center gap-2 mb-2">
+        <Bot size={15} color={colors.emerald} />
+        <SectionLabel>Ask AI about this topic</SectionLabel>
+      </div>
+      <div className="flex flex-col gap-2 mb-3 overflow-y-auto" style={{ maxHeight: 220 }}>
+        {messages.map((message, index) => (
+          <div key={index} className="rounded-xl px-3 py-2 text-xs" style={{ background: message.role === "user" ? colors.emerald : colors.paper, color: message.role === "user" ? "#fff" : colors.ink, lineHeight: 1.5 }}>
+            {message.text}
+          </div>
+        ))}
+        {thinking && <p className="text-xs" style={{ color: colors.inkSoft }}>Thinking about {topic}...</p>}
+      </div>
+      <div className="flex items-center gap-2">
+        <input
+          value={question}
+          onChange={(event) => setQuestion(event.target.value)}
+          onKeyDown={(event) => event.key === "Enter" && ask()}
+          placeholder={`Ask about ${topic}`}
+          className="flex-1 text-sm px-3 py-2 rounded-full outline-none"
+          style={{ background: colors.paper, color: colors.ink, border: `1px solid ${colors.border}` }}
+        />
+        <button onClick={ask} aria-label="Ask AI" className="flex items-center justify-center rounded-full shrink-0" style={{ width: 38, height: 38, background: colors.emerald }}>
+          <Send size={15} color="#fff" />
+        </button>
+      </div>
+    </Card>
+  );
+}
+
+function FileTopicDetail({ topic, plan, back }) {
+  const details = plan.topicDetails?.find((item) => item.name === topic);
+  const task = plan.dailyTasks?.find((item) => item.task.toLowerCase().includes(topic.toLowerCase()));
+  const questions = (plan.quiz || []).filter((question) => question.topic === topic);
+
+  return (
+    <div className="flex flex-col gap-4 pt-1">
+      <button onClick={back} className="flex items-center gap-1 text-sm self-start" style={{ color: colors.inkSoft }}>
+        <ChevronLeft size={16} />
+        All topics
+      </button>
+      <div>
+        <p style={{ fontFamily: "Fraunces, serif", fontSize: 22, color: colors.ink, fontWeight: 600 }}>{topic}</p>
+        <p className="text-xs mt-1" style={{ color: colors.inkSoft }}>From your uploaded material</p>
+      </div>
+
+      <Card>
+        <div className="flex items-center gap-2 mb-2">
+          <FileText size={15} color={colors.emerald} />
+          <SectionLabel>Full study notes</SectionLabel>
+        </div>
+        <div className="overflow-y-auto" style={{ maxHeight: 260 }}>
+          <p className="text-sm" style={{ color: colors.ink, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>
+            {plan.content || details?.context || plan.summary || "This topic was extracted from your uploaded file."}
+          </p>
+        </div>
+      </Card>
+
+      <Card>
+        <div className="flex items-center gap-2 mb-3">
+          <BookOpen size={15} color={colors.emerald} />
+          <SectionLabel>All concepts in this file</SectionLabel>
+        </div>
+        <div className="flex flex-col gap-2">
+          {plan.topics.map((concept, index) => (
+            <div key={`${concept}-${index}`} className="flex items-start gap-2">
+              <span className="text-xs" style={{ color: colors.emerald, fontWeight: 600 }}>{index + 1}.</span>
+              <span className="text-sm" style={{ color: colors.ink }}>{concept}</span>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      <Card>
+        <div className="flex items-center gap-2 mb-2">
+          <Calendar size={15} color={colors.emerald} />
+          <SectionLabel>Study task</SectionLabel>
+        </div>
+        <p className="text-sm" style={{ color: colors.ink, fontWeight: 500 }}>
+          {task?.task || `Review ${topic} from your uploaded material.`}
+        </p>
+        {task && <p className="text-xs mt-1" style={{ color: colors.inkSoft }}>{task.time}</p>}
+      </Card>
+
+      <Card>
+        <div className="flex items-center gap-2 mb-2">
+          <Check size={15} color={colors.emerald} />
+          <SectionLabel>Check your understanding</SectionLabel>
+        </div>
+        <p className="text-sm" style={{ color: colors.ink, lineHeight: 1.5 }}>
+          {questions.length ? questions[0].question : "Take the file test to check this topic."}
+        </p>
+        {questions.length > 0 && (
+          <div className="flex flex-col gap-2 mt-3">
+            {questions.map((question) => (
+              <div key={question.id} className="rounded-xl px-3 py-2" style={{ background: colors.emeraldSoft }}>
+                <p className="text-xs" style={{ color: colors.ink, lineHeight: 1.45 }}>{question.question}</p>
+                <p className="text-xs mt-1" style={{ color: colors.emerald, fontWeight: 600 }}>Answer: {question.correctAnswer}</p>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      <TopicStudyChat topic={topic} context={plan.content || details?.context || plan.summary || ""} />
+    </div>
+  );
+}
+
+function SubjectsList({ goToSubject, plan }) {
+  const [selectedTopic, setSelectedTopic] = useState(null);
+
+  if (plan?.topics?.length) {
+    if (selectedTopic) return <FileTopicDetail topic={selectedTopic} plan={plan} back={() => setSelectedTopic(null)} />;
+    return (
+      <div className="flex flex-col gap-4 pt-1">
+        <div>
+          <p style={{ fontFamily: "Fraunces, serif", fontSize: 22, color: colors.ink, fontWeight: 600 }}>
+            Learn from your files
+          </p>
+          <p className="text-xs mt-1" style={{ color: colors.inkSoft }}>
+            {plan.files?.length || 1} uploaded file{plan.files?.length === 1 ? "" : "s"} · {plan.topics.length} topics found
+          </p>
+        </div>
+        <div className="flex flex-col gap-2">
+          {plan.topics.map((topic, index) => (
+            <Card key={`${topic}-${index}`} onClick={() => setSelectedTopic(topic)}>
+              <div className="flex items-center gap-3">
+                <div
+                  className="flex items-center justify-center rounded-xl shrink-0"
+                  style={{ width: 36, height: 36, background: colors.emeraldSoft }}
+                >
+                  <BookOpen size={16} color={colors.emerald} />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-sm" style={{ color: colors.ink, fontWeight: 600 }}>{topic}</p>
+                  <p className="text-xs mt-0.5" style={{ color: colors.inkSoft }}>From your uploaded material</p>
+                </div>
+                <ChevronRight size={16} color={colors.inkSoft} className="ml-auto shrink-0" />
+              </div>
+            </Card>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-4 pt-1">
       <p style={{ fontFamily: "Fraunces, serif", fontSize: 22, color: colors.ink, fontWeight: 600 }}>Your subjects</p>
@@ -572,7 +864,135 @@ function SubjectDetail({ subjectId, back }) {
   );
 }
 
-function ProgressScreen() {
+function ProgressScreen({ plan }) {
+  if (plan?.topics?.length) {
+    const tasks = plan.dailyTasks || [];
+    const completedTasks = tasks.filter((task) => task.done).length;
+    const assignmentsDone = (plan.assignments || []).filter((assignment) => assignment.status === "submitted").length;
+    const quizLength = plan.lastTestQuestionCount || (plan.dailyQuiz || plan.quiz || []).length;
+    const hasTestScore = typeof plan.lastTestScore === "number" && quizLength > 0;
+    const performance = hasTestScore ? Math.round((plan.lastTestScore / quizLength) * 100) : 0;
+    const estimatedCgpa = hasTestScore ? (5 + performance / 20).toFixed(2) : "--";
+    const testScore = hasTestScore ? `${plan.lastTestScore}/${quizLength}` : "Not taken";
+    const assignmentTotal = (plan.assignments || []).length;
+    const taskPercent = tasks.length ? Math.round((completedTasks / tasks.length) * 100) : 0;
+    const assignmentPercent = assignmentTotal ? Math.round((assignmentsDone / assignmentTotal) * 100) : 0;
+    const performanceBars = [
+      { label: "Test", value: performance, color: colors.emerald },
+      { label: "Tasks", value: taskPercent, color: colors.ochre },
+      { label: "Work", value: assignmentPercent, color: colors.brick },
+    ];
+    return (
+      <div className="flex flex-col gap-5 pt-1">
+        <p style={{ fontFamily: "Fraunces, serif", fontSize: 22, color: colors.ink, fontWeight: 600 }}>Your progress</p>
+        <p className="text-xs" style={{ color: colors.inkSoft }}>
+          Based on {plan.files?.length || 1} uploaded file{plan.files?.length === 1 ? "" : "s"}
+        </p>
+
+        <Card>
+          <div className="flex items-center justify-between mb-3">
+            <SectionLabel>Daily performance</SectionLabel>
+            <span className="text-xs" style={{ color: colors.inkSoft }}>Live</span>
+          </div>
+          <div className="flex items-end justify-around gap-4" style={{ height: 132 }}>
+            {performanceBars.map((bar) => (
+              <div key={bar.label} className="flex-1 h-full flex flex-col items-center justify-end gap-2">
+                <span className="text-xs" style={{ color: colors.ink, fontWeight: 600 }}>{bar.value}%</span>
+                <div className="w-full flex-1 flex items-end rounded-t-lg" style={{ background: colors.border }}>
+                  <div
+                    className="w-full rounded-t-lg"
+                    style={{ height: `${Math.max(bar.value, 3)}%`, background: bar.color, transition: "height 300ms ease" }}
+                  />
+                </div>
+                <span className="text-xs" style={{ color: colors.inkSoft }}>{bar.label}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+
+        <Card>
+          <div className="flex items-center gap-5">
+            <div className="relative shrink-0" style={{ width: 124, height: 124 }}>
+              <Ring value={performance} size={124} stroke={11} />
+              <div className="absolute inset-0 flex flex-col items-center justify-center">
+                <span style={{ fontFamily: "Fraunces, serif", fontSize: 29, color: colors.ink, fontWeight: 600 }}>
+                  {hasTestScore ? `${performance}%` : "--"}
+                </span>
+                <span className="text-xs" style={{ color: colors.inkSoft }}>test score</span>
+              </div>
+            </div>
+            <div className="flex-1 min-w-0">
+              <SectionLabel>Current performance</SectionLabel>
+              <p className="text-sm" style={{ color: colors.ink, fontWeight: 600 }}>
+                {hasTestScore ? `${testScore} correct` : "Test not taken"}
+              </p>
+              <p className="text-xs mt-1" style={{ color: colors.inkSoft }}>
+                {hasTestScore ? "Based on your latest file test." : "Take the file test to calculate performance."}
+              </p>
+              <div className="mt-3">
+                <p className="text-xs" style={{ color: colors.inkSoft }}>Estimated CGPA</p>
+                <p style={{ fontFamily: "Fraunces, serif", fontSize: 25, color: colors.emerald, fontWeight: 600 }}>{estimatedCgpa}<span className="text-xs" style={{ fontFamily: "Inter, sans-serif", color: colors.inkSoft }}> / 10</span></p>
+              </div>
+            </div>
+          </div>
+        </Card>
+
+        <Card>
+          <div className="flex items-center justify-between mb-2">
+            <SectionLabel>Daily task progress</SectionLabel>
+            <span className="text-xs" style={{ color: colors.inkSoft }}>{completedTasks}/{tasks.length}</span>
+          </div>
+          <div className="rounded-full h-2" style={{ background: colors.border }}>
+            <div className="h-2 rounded-full" style={{ width: `${taskPercent}%`, background: colors.emerald }} />
+          </div>
+          <div className="flex items-center justify-between mt-3 mb-2">
+            <SectionLabel>Assignments submitted</SectionLabel>
+            <span className="text-xs" style={{ color: colors.inkSoft }}>{assignmentsDone}/{assignmentTotal}</span>
+          </div>
+          <div className="rounded-full h-2" style={{ background: colors.border }}>
+            <div className="h-2 rounded-full" style={{ width: `${assignmentPercent}%`, background: colors.ochre }} />
+          </div>
+        </Card>
+
+        {plan.lastTestResults && (
+          <Card>
+            <div className="flex items-center justify-between mb-3">
+              <SectionLabel>Topic performance</SectionLabel>
+              <span className="text-xs" style={{ color: colors.inkSoft }}>From latest test</span>
+            </div>
+            <div className="flex flex-col gap-3">
+              {getTopicPerformance(plan).map(({ topic, percent }) => (
+                <div key={topic}>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs truncate pr-2" style={{ color: colors.ink }}>{topic}</span>
+                    <span className="text-xs" style={{ color: percent < 60 ? colors.brick : colors.emerald, fontWeight: 600 }}>{percent}%</span>
+                  </div>
+                  <div className="rounded-full h-2" style={{ background: colors.border }}>
+                    <div className="h-2 rounded-full" style={{ width: `${percent}%`, background: percent < 60 ? colors.brick : colors.emerald, transition: "width 300ms ease" }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Card>
+        )}
+
+        <div>
+          <SectionLabel>Topics from your files</SectionLabel>
+          <div className="flex flex-col gap-2">
+            {plan.topics.map((topic, index) => (
+              <Card key={`${topic}-${index}`}>
+                <div className="flex items-center gap-3">
+                  <BookOpen size={15} color={colors.emerald} />
+                  <span className="text-sm" style={{ color: colors.ink, fontWeight: 500 }}>{topic}</span>
+                </div>
+              </Card>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   const maxMin = Math.max(...weeklyMinutes);
   return (
     <div className="flex flex-col gap-5 pt-1">
@@ -869,9 +1289,15 @@ function AssistantScreen() {
   );
 }
 
-function DailyPlanner() {
-  const [tasks, setTasks] = useState(dailyTasksSeed);
-  const toggle = (id) => setTasks((t) => t.map((x) => (x.id === id ? { ...x, done: !x.done } : x)));
+function DailyPlanner({ plan, onUpdatePlan }) {
+  const [tasks, setTasks] = useState(plan?.dailyTasks?.length ? plan.dailyTasks : dailyTasksSeed);
+  const toggle = (id) => {
+    setTasks((current) => {
+      const next = current.map((item) => (item.id === id ? { ...item, done: !item.done } : item));
+      if (plan && onUpdatePlan) onUpdatePlan({ ...plan, dailyTasks: next });
+      return next;
+    });
+  };
   const doneCount = tasks.filter((t) => t.done).length;
 
   return (
@@ -917,16 +1343,281 @@ function DailyPlanner() {
   );
 }
 
+function TimelinePanel({ plan }) {
+  const tasks = plan?.dailyTasks?.length ? plan.dailyTasks : dailyTasksSeed;
+  const items = [
+    ...tasks.map((task) => ({
+      key: `task-${task.id}`,
+      label: task.time,
+      title: task.task,
+      meta: task.subject,
+      complete: task.done,
+      color: colors.emerald,
+      icon: Calendar,
+    })),
+    ...(plan?.assignments?.length ? plan.assignments : assignments).map((assignment) => ({
+      key: `assignment-${assignment.id}`,
+      label: assignment.due,
+      title: assignment.title,
+      meta: `${assignment.subject} · assignment`,
+      complete: assignment.status === "submitted",
+      color: assignment.status === "overdue" ? colors.brick : colors.ochre,
+      icon: FileText,
+    })),
+  ];
+
+  return (
+    <div className="flex flex-col gap-3">
+      <p className="text-xs" style={{ color: colors.inkSoft }}>
+        {plan ? "Your uploaded-file study timeline" : "Your study timeline"}
+      </p>
+      <div className="flex flex-col gap-2">
+        {items.map((item) => {
+          const Icon = item.icon;
+          return (
+            <Card key={item.key} style={{ opacity: item.complete ? 0.7 : 1 }}>
+              <div className="flex items-start gap-3">
+                <div className="flex flex-col items-center gap-1 shrink-0">
+                  <div className="flex items-center justify-center rounded-full" style={{ width: 30, height: 30, background: item.complete ? colors.emeraldSoft : colors.ochreSoft }}>
+                    {item.complete ? <Check size={15} color={colors.emerald} /> : <Icon size={15} color={item.color} />}
+                  </div>
+                  <div style={{ width: 1, height: 18, background: colors.border }} />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-xs" style={{ color: item.color, fontWeight: 600 }}>{item.label}</p>
+                  <p className="text-sm mt-0.5" style={{ color: colors.ink, fontWeight: 500, textDecoration: item.complete ? "line-through" : "none" }}>{item.title}</p>
+                  <p className="text-xs mt-0.5" style={{ color: colors.inkSoft }}>{item.meta}</p>
+                </div>
+              </div>
+            </Card>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function InlineTestUpload({ onPlan }) {
+  const [files, setFiles] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const analyze = async () => {
+    if (!files.length || loading) return;
+    setLoading(true);
+    setError("");
+    const formData = new FormData();
+    files.forEach((file) => formData.append("files", file));
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/analyze`, { method: "POST", body: formData });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not analyze the files.");
+      onPlan(result);
+    } catch (analysisError) {
+      setError(analysisError.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Card>
+      <div className="flex items-center gap-2 mb-2">
+        <Upload size={15} color={colors.emerald} />
+        <p className="text-sm" style={{ color: colors.ink, fontWeight: 600 }}>Create a test from your files</p>
+      </div>
+      <p className="text-xs mb-3" style={{ color: colors.inkSoft }}>
+        Upload notes, a syllabus, PDF, Word document, or text file to generate today&apos;s test.
+      </p>
+      <label className="flex items-center justify-center rounded-xl py-3 cursor-pointer" style={{ border: `1px dashed ${colors.border}`, background: colors.paper }}>
+        <span className="text-sm" style={{ color: colors.emerald, fontWeight: 600 }}>{files.length ? `${files.length} file selected` : "Choose study files"}</span>
+        <input type="file" multiple accept=".pdf,.doc,.docx,.txt" style={{ display: "none" }} onChange={(event) => setFiles(Array.from(event.target.files || []))} />
+      </label>
+      {error && <p className="text-xs mt-2" style={{ color: colors.brick }}>{error}</p>}
+      <button onClick={analyze} disabled={!files.length || loading} className="w-full text-sm rounded-full py-2.5 mt-3" style={{ background: files.length && !loading ? colors.emerald : colors.border, color: files.length && !loading ? "#fff" : colors.inkSoft, fontWeight: 600 }}>
+        {loading ? "Analyzing files..." : "Generate daily test"}
+      </button>
+    </Card>
+  );
+}
+
+function DailyTestGenerator({ plan, onUpdatePlan }) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const generate = async () => {
+    if (loading) return;
+    setLoading(true);
+    setError("");
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/generate-test`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          content: plan.content || plan.summary || plan.topics?.join("\n") || "",
+          topics: plan.dailyTasks?.map((task) => task.task.replace(/^Study\s+/i, "")) || plan.topics,
+          dailyTasks: plan.dailyTasks || [],
+          assignments: plan.assignments || [],
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not create today's test.");
+      onUpdatePlan({ ...plan, dailyQuiz: result.questions, dailyQuizSource: result.source || "local" });
+    } catch (generationError) {
+      setError(generationError.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Card>
+      <div className="flex items-center gap-2 mb-2">
+        <Sparkles size={15} color={colors.emerald} />
+        <p className="text-sm" style={{ color: colors.ink, fontWeight: 600 }}>Create today&apos;s test</p>
+      </div>
+      <p className="text-xs" style={{ color: colors.inkSoft, lineHeight: 1.5 }}>
+        Use your previously uploaded file and today&apos;s study-task topics to create a new understanding test.
+      </p>
+      {error && <p className="text-xs mt-2" style={{ color: colors.brick }}>{error}</p>}
+      <button onClick={generate} disabled={loading} className="w-full text-sm rounded-full py-2.5 mt-3" style={{ background: loading ? colors.border : colors.emerald, color: loading ? colors.inkSoft : "#fff", fontWeight: 600 }}>
+        {loading ? "Creating test..." : "Create today's test"}
+      </button>
+    </Card>
+  );
+}
+
+function FileQuiz({ plan, onUpdatePlan }) {
+  const questions = plan?.dailyQuizSource ? plan.dailyQuiz || [] : [];
+  const [current, setCurrent] = useState(0);
+  const [selected, setSelected] = useState(null);
+  const [score, setScore] = useState(0);
+  const [answers, setAnswers] = useState({});
+  const [finished, setFinished] = useState(false);
+
+  if (!questions.length) {
+    return plan ? <DailyTestGenerator plan={plan} onUpdatePlan={onUpdatePlan} /> : <InlineTestUpload onPlan={onUpdatePlan} />;
+  }
+
+  if (finished) {
+    const topicResults = questions.reduce((result, question) => {
+      const current = result[question.topic] || { correct: 0, total: 0 };
+      current.total += 1;
+      if (answers[question.id] === question.correctAnswer) current.correct += 1;
+      result[question.topic] = current;
+      return result;
+    }, {});
+    return (
+      <div className="flex flex-col gap-3">
+        <Card>
+          <p style={{ fontFamily: "Fraunces, serif", fontSize: 20, color: colors.ink, fontWeight: 600 }}>Test complete</p>
+          <p className="text-sm mt-2" style={{ color: colors.inkSoft }}>You scored {score} out of {questions.length}.</p>
+        </Card>
+        <Card>
+          <SectionLabel>Weak topics from this test</SectionLabel>
+          <div className="flex flex-col gap-3">
+            {Object.entries(topicResults).map(([topic, result]) => {
+              const percent = Math.round((result.correct / result.total) * 100);
+              return (
+                <div key={topic}>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs" style={{ color: colors.ink }}>{topic}</span>
+                    <span className="text-xs" style={{ color: percent < 60 ? colors.brick : colors.emerald, fontWeight: 600 }}>{percent}%</span>
+                  </div>
+                  <div className="rounded-full h-2" style={{ background: colors.border }}>
+                    <div className="h-2 rounded-full" style={{ width: `${percent}%`, background: percent < 60 ? colors.brick : colors.emerald }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <button
+            onClick={() => { setCurrent(0); setSelected(null); setScore(0); setAnswers({}); setFinished(false); }}
+            className="text-sm rounded-full px-4 py-2.5 mt-4"
+            style={{ background: colors.emerald, color: "#fff", fontWeight: 600 }}
+          >
+            Retake test
+          </button>
+        </Card>
+      </div>
+    );
+  }
+
+  const question = questions[current];
+  const answer = (option) => {
+    if (selected) return;
+    setSelected(option);
+    setAnswers((currentAnswers) => ({ ...currentAnswers, [question.id]: option }));
+    if (option === question.correctAnswer) setScore((value) => value + 1);
+  };
+  const next = () => {
+    if (current === questions.length - 1) {
+      const finalScore = score + (selected === question.correctAnswer ? 1 : 0);
+      const finalAnswers = { ...answers, [question.id]: selected };
+      const lastTestResults = questions.reduce((result, item) => {
+        const current = result[item.topic] || { correct: 0, total: 0 };
+        current.total += 1;
+        if (finalAnswers[item.id] === item.correctAnswer) current.correct += 1;
+        result[item.topic] = current;
+        return result;
+      }, {});
+      onUpdatePlan?.({ ...plan, lastTestScore: finalScore, lastTestQuestionCount: questions.length, lastTestAt: new Date().toISOString(), lastTestResults });
+      setFinished(true);
+    } else {
+      setCurrent((value) => value + 1);
+      setSelected(null);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-3">
+      <p className="text-xs" style={{ color: colors.inkSoft }}>
+        Daily test · {plan.dailyQuizSource === "ai" ? "ChatGPT generated" : "Study-plan generated"} · Question {current + 1} of {questions.length}
+      </p>
+      <Card>
+        <p className="text-sm" style={{ color: colors.ink, fontWeight: 600 }}>{question.question}</p>
+        <p className="text-xs mt-1 mb-3" style={{ color: colors.inkSoft }}>Topic: {question.topic}</p>
+        <div className="flex flex-col gap-2">
+          {question.options.map((option) => {
+            const isCorrect = selected && option === question.correctAnswer;
+            const isWrong = selected === option && option !== question.correctAnswer;
+            return (
+              <button
+                key={option}
+                onClick={() => answer(option)}
+                className="text-left text-sm rounded-xl px-3 py-2.5"
+                style={{
+                  background: isCorrect ? colors.emeraldSoft : isWrong ? colors.brickSoft : colors.paper,
+                  border: `1px solid ${isCorrect ? colors.emerald : isWrong ? colors.brick : colors.border}`,
+                  color: colors.ink,
+                }}
+              >
+                {option}
+              </button>
+            );
+          })}
+        </div>
+        {selected && (
+          <button onClick={next} className="w-full text-sm rounded-full py-2.5 mt-4" style={{ background: colors.emerald, color: "#fff", fontWeight: 600 }}>
+            {current === questions.length - 1 ? "Finish test" : "Next question"}
+          </button>
+        )}
+      </Card>
+    </div>
+  );
+}
+
 function statusColors(status) {
   if (status === "submitted") return { bg: colors.emeraldSoft, fg: colors.emerald, label: "Submitted" };
   if (status === "overdue") return { bg: colors.brickSoft, fg: colors.brick, label: "Overdue" };
   return { bg: colors.ochreSoft, fg: colors.ochre, label: "Pending" };
 }
 
-function AssignmentsPanel() {
+function AssignmentsPanel({ plan }) {
+  const items = plan?.assignments?.length ? plan.assignments : assignments;
   return (
     <div className="flex flex-col gap-2">
-      {assignments.map((a) => {
+      {items.map((a) => {
         const s = statusColors(a.status);
         return (
           <Card key={a.id}>
@@ -956,237 +1647,55 @@ function AssignmentsPanel() {
   );
 }
 
-function AttendancePanel() {
-  return (
-    <div className="flex flex-col gap-2">
-      {attendance.map((a) => {
-        const p = attendancePrediction(a);
-        return (
-          <Card key={a.id}>
-            <div className="flex items-center justify-between mb-2">
-              <p className="text-sm" style={{ color: colors.ink, fontWeight: 500 }}>
-                {a.name}
-              </p>
-              <span className="text-sm" style={{ color: p.safe ? colors.emerald : colors.brick, fontWeight: 600 }}>
-                {Math.round(p.pct)}%
-              </span>
-            </div>
-            <div className="rounded-full h-1.5 mb-2.5" style={{ background: colors.border }}>
-              <div
-                className="h-1.5 rounded-full"
-                style={{ width: `${Math.min(p.pct, 100)}%`, background: p.safe ? colors.emerald : colors.brick }}
-              />
-            </div>
-            <div className="flex items-start gap-1.5">
-              {!p.safe && <AlertTriangle size={13} color={colors.brick} className="mt-0.5 shrink-0" />}
-              <p className="text-xs" style={{ color: p.safe ? colors.inkSoft : colors.brick, lineHeight: 1.5 }}>
-                {p.message}
-              </p>
-            </div>
-          </Card>
-        );
-      })}
-    </div>
-  );
-}
-
-const QUIZ_API_BASE = "http://localhost:5000";
-
-function QuizPanel() {
-  const [status, setStatus] = useState("idle"); // idle | loading | ready | done | error
-  const [questions, setQuestions] = useState([]);
-  const [index, setIndex] = useState(0);
-  const [selected, setSelected] = useState(null);
-  const [score, setScore] = useState(0);
-  const [errorMsg, setErrorMsg] = useState("");
-
-  const startQuiz = async () => {
-    setStatus("loading");
-    setErrorMsg("");
-    try {
-      const res = await fetch(`${QUIZ_API_BASE}/api/quiz?amount=5`);
-      if (!res.ok) throw new Error("Server error");
-      const data = await res.json();
-      if (data.error || !data.questions || !data.questions.length) {
-        throw new Error(data.error || "No questions returned");
-      }
-      setQuestions(data.questions);
-      setIndex(0);
-      setSelected(null);
-      setScore(0);
-      setStatus("ready");
-    } catch (e) {
-      setErrorMsg("Couldn't reach the quiz server. Make sure the Python backend is running at " + QUIZ_API_BASE + ".");
-      setStatus("error");
-    }
-  };
-
-  const choose = (opt) => {
-    if (selected) return;
-    setSelected(opt);
-    if (opt === questions[index].correctAnswer) setScore((s) => s + 1);
-  };
-
-  const next = () => {
-    if (index + 1 < questions.length) {
-      setIndex((i) => i + 1);
-      setSelected(null);
-    } else {
-      setStatus("done");
-    }
-  };
-
-  if (status === "idle") {
-    return (
-      <div className="flex flex-col items-center text-center gap-3 py-8">
-        <div
-          className="flex items-center justify-center rounded-2xl"
-          style={{ width: 46, height: 46, background: colors.emeraldSoft }}
-        >
-          <ListChecks size={20} color={colors.emerald} />
-        </div>
-        <p className="text-sm" style={{ color: colors.ink, fontWeight: 500 }}>
-          Quick-fire trivia across everyday topics
-        </p>
-        <p className="text-xs" style={{ color: colors.inkSoft, maxWidth: 240, lineHeight: 1.5 }}>
-          Five multiple-choice questions, pulled live each time — a good mental warm-up between study blocks.
-        </p>
-        <button
-          onClick={startQuiz}
-          className="text-sm rounded-full px-5 py-2.5 mt-2"
-          style={{ background: colors.emerald, color: "#fff", fontWeight: 600 }}
-        >
-          Start quiz
-        </button>
-      </div>
-    );
-  }
-
-  if (status === "loading") {
-    return (
-      <div className="flex flex-col items-center justify-center gap-3 py-10">
-        <Loader2 size={22} color={colors.emerald} className="animate-spin" />
-        <p className="text-xs" style={{ color: colors.inkSoft }}>
-          Fetching fresh questions…
-        </p>
-      </div>
-    );
-  }
-
-  if (status === "error") {
-    return (
-      <div className="flex flex-col items-center text-center gap-3 py-8">
-        <AlertTriangle size={22} color={colors.brick} />
-        <p className="text-xs" style={{ color: colors.brick, maxWidth: 260, lineHeight: 1.5 }}>
-          {errorMsg}
-        </p>
-        <button
-          onClick={startQuiz}
-          className="text-sm rounded-full px-5 py-2.5 mt-1"
-          style={{ background: colors.emerald, color: "#fff", fontWeight: 600 }}
-        >
-          Try again
-        </button>
-      </div>
-    );
-  }
-
-  if (status === "done") {
-    return (
-      <div className="flex flex-col items-center text-center gap-3 py-8">
-        <div className="relative" style={{ width: 100, height: 100 }}>
-          <Ring value={(score / questions.length) * 100} size={100} stroke={9} />
-          <div className="absolute inset-0 flex flex-col items-center justify-center">
-            <span style={{ fontFamily: "Fraunces, serif", fontSize: 20, color: colors.ink, fontWeight: 600 }}>
-              {score}/{questions.length}
-            </span>
-          </div>
-        </div>
-        <p className="text-sm" style={{ color: colors.ink, fontWeight: 500 }}>
-          Quiz complete
-        </p>
-        <button
-          onClick={startQuiz}
-          className="text-sm rounded-full px-5 py-2.5 mt-1"
-          style={{ background: colors.emerald, color: "#fff", fontWeight: 600 }}
-        >
-          Take another
-        </button>
-      </div>
-    );
-  }
-
-  const q = questions[index];
+function AttendancePanel({ studyAttendanceDates }) {
+  const loggedInDates = Array.isArray(studyAttendanceDates) ? studyAttendanceDates : [];
+  const dates = recentDateKeys();
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex items-center justify-between">
-        <span className="text-xs" style={{ color: colors.inkSoft }}>
-          Question {index + 1} of {questions.length}
-        </span>
-        {q.category && (
-          <span
-            className="text-xs px-2 py-0.5 rounded-full"
-            style={{ background: colors.ochreSoft, color: colors.ochre, fontWeight: 600 }}
-          >
-            {q.category}
+      <Card style={{ background: colors.emeraldSoft, borderColor: colors.emerald }}>
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm" style={{ color: colors.ink, fontWeight: 600 }}>Study attendance today</p>
+            <p className="text-xs mt-0.5" style={{ color: colors.inkSoft }}>
+              {loggedInDates.includes(localDateKey()) ? "Marked present when you logged in." : "Log in today to mark yourself present."}
+            </p>
+          </div>
+          <span className="text-xs px-2 py-1 rounded-full" style={{ background: colors.card, color: colors.emerald, fontWeight: 600 }}>
+            {loggedInDates.includes(localDateKey()) ? "Present" : "Not marked"}
           </span>
-        )}
-      </div>
-      <Card>
-        <p className="text-sm" style={{ color: colors.ink, lineHeight: 1.5, fontWeight: 500 }}>
-          {q.question}
-        </p>
+        </div>
       </Card>
-      <div className="flex flex-col gap-2">
-        {q.options.map((opt) => {
-          const isCorrect = opt === q.correctAnswer;
-          const isSelected = opt === selected;
-          let bg = colors.card;
-          let border = colors.border;
-          let fg = colors.ink;
-          if (selected) {
-            if (isCorrect) {
-              bg = colors.emeraldSoft;
-              border = colors.emerald;
-              fg = colors.emerald;
-            } else if (isSelected) {
-              bg = colors.brickSoft;
-              border = colors.brick;
-              fg = colors.brick;
-            }
-          }
-          return (
-            <button
-              key={opt}
-              onClick={() => choose(opt)}
-              className="text-left text-sm rounded-xl px-3.5 py-2.5"
-              style={{ background: bg, border: `1px solid ${border}`, color: fg }}
-            >
-              {opt}
-            </button>
-          );
-        })}
-      </div>
-      {selected && (
-        <button
-          onClick={next}
-          className="text-sm rounded-full py-2.5 mt-1"
-          style={{ background: colors.emerald, color: "#fff", fontWeight: 600 }}
-        >
-          {index + 1 < questions.length ? "Next question" : "See results"}
-        </button>
-      )}
+      <Card>
+        <div className="flex items-center gap-2 mb-3">
+          <Calendar size={15} color={colors.emerald} />
+          <p className="text-sm" style={{ color: colors.ink, fontWeight: 600 }}>Last 7 days</p>
+        </div>
+        <div className="flex flex-col gap-2">
+          {dates.map((dateKey, index) => {
+            const present = loggedInDates.includes(dateKey);
+            return (
+              <div key={dateKey} className="flex items-center justify-between">
+                <span className="text-xs" style={{ color: colors.ink }}>{index === 0 ? "Today" : formatDateLabel(dateKey)}</span>
+                <span className="text-xs px-2 py-1 rounded-full" style={{ background: present ? colors.emeraldSoft : colors.brickSoft, color: present ? colors.emerald : colors.brick, fontWeight: 600 }}>
+                  {present ? "Present" : "Not present"}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </Card>
     </div>
   );
 }
 
-function PlannerScreen() {
+function PlannerScreen({ plan, onUpdatePlan, studyAttendanceDates }) {
   const [mode, setMode] = useState("today");
   const tabs = [
     { id: "today", label: "Today" },
+    { id: "timeline", label: "Timeline" },
     { id: "tasks", label: "Assignments" },
+    { id: "test", label: "Test" },
     { id: "attendance", label: "Attendance" },
-    { id: "quiz", label: "Quiz" },
   ];
   return (
     <div className="flex flex-col gap-4 pt-1">
@@ -1207,10 +1716,13 @@ function PlannerScreen() {
           </button>
         ))}
       </div>
-      {mode === "today" && <DailyPlanner />}
-      {mode === "tasks" && <AssignmentsPanel />}
-      {mode === "attendance" && <AttendancePanel />}
-      {mode === "quiz" && <QuizPanel />}
+      {mode === "today" && <DailyPlanner plan={plan} onUpdatePlan={onUpdatePlan} />}
+      {mode === "timeline" && <TimelinePanel plan={plan} />}
+      {mode === "tasks" && <AssignmentsPanel plan={plan} />}
+      {mode === "test" && <FileQuiz plan={plan} onUpdatePlan={onUpdatePlan} />}
+      {mode === "attendance" && (
+        <AttendancePanel studyAttendanceDates={studyAttendanceDates} />
+      )}
     </div>
   );
 }
@@ -1435,7 +1947,7 @@ function PlacementPrep({ back }) {
   );
 }
 
-function ProfileScreen({ userName, userEmail, onLogout }) {
+function ProfileScreen({ userName, userEmail, onLogout, onUpdatePlan }) {
   const [view, setView] = useState(null);
   if (view === "resume") return <ResumeAnalyzer back={() => setView(null)} />;
   if (view === "placement") return <PlacementPrep back={() => setView(null)} />;
@@ -1463,6 +1975,18 @@ function ProfileScreen({ userName, userEmail, onLogout }) {
           </p>
         </div>
       </div>
+
+      <button
+        onClick={onUpdatePlan}
+        className="flex items-center justify-between rounded-2xl p-4 text-left"
+        style={{ background: colors.emeraldSoft, border: `1px solid ${colors.border}` }}
+      >
+        <span className="flex items-center gap-2.5 text-sm" style={{ color: colors.emerald, fontWeight: 600 }}>
+          <Upload size={15} />
+          Analyze new study files
+        </span>
+        <ChevronRight size={15} color={colors.emerald} />
+      </button>
 
       <div>
         <SectionLabel>Career</SectionLabel>
@@ -1572,7 +2096,7 @@ function LoginScreen({ accounts, addAccount, onLogin }) {
   };
 
   return (
-    <div className="flex-1 flex flex-col justify-center px-7 overflow-y-auto">
+    <div className="auth-screen flex-1 flex flex-col justify-center px-7 overflow-y-auto">
       <div
         className="flex items-center justify-center rounded-2xl mb-5 self-start"
         style={{ width: 46, height: 46, background: colors.emeraldSoft }}
@@ -1669,7 +2193,7 @@ function LoginScreen({ accounts, addAccount, onLogin }) {
 
       <button
         onClick={mode === "signin" ? submitSignin : submitSignup}
-        className="text-sm rounded-full py-3 mt-5"
+        className="auth-primary text-sm rounded-full py-3 mt-5"
         style={{ background: colors.emerald, color: "#fff", fontWeight: 600 }}
       >
         {mode === "signin" ? "Sign in" : "Create account"}
@@ -1680,7 +2204,7 @@ function LoginScreen({ accounts, addAccount, onLogin }) {
           setMode(mode === "signin" ? "signup" : "signin");
           setError("");
         }}
-        className="text-sm mt-4"
+        className="auth-secondary text-sm mt-4"
         style={{ color: colors.emerald, fontWeight: 500 }}
       >
         {mode === "signin" ? "Don't have an account? Sign up" : "Already have an account? Sign in"}
@@ -1692,10 +2216,24 @@ function LoginScreen({ accounts, addAccount, onLogin }) {
 function OnboardingScreen({ onComplete }) {
   const [step, setStep] = useState("ask");
   const [files, setFiles] = useState([]);
+  const [plan, setPlan] = useState(null);
+  const [error, setError] = useState("");
 
-  const analyze = () => {
+  const analyze = async () => {
     setStep("analyzing");
-    setTimeout(() => setStep("results"), 1600);
+    setError("");
+    const formData = new FormData();
+    files.forEach((file) => formData.append("files", file));
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/analyze`, { method: "POST", body: formData });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not analyze the uploaded files.");
+      setPlan(result);
+      setStep("results");
+    } catch (analysisError) {
+      setError(analysisError.message);
+      setStep("upload");
+    }
   };
 
   if (step === "ask") {
@@ -1740,6 +2278,7 @@ function OnboardingScreen({ onComplete }) {
         <p className="text-sm mt-2 mb-4" style={{ color: colors.inkSoft }}>
           PDFs, Word docs, or text notes work best.
         </p>
+        {error && <p className="text-xs mb-3" style={{ color: colors.brick }}>{error}</p>}
 
         <label
           className="flex flex-col items-center justify-center gap-2 rounded-2xl py-8 cursor-pointer"
@@ -1823,14 +2362,14 @@ function OnboardingScreen({ onComplete }) {
         Analysis complete
       </p>
       <p className="text-sm mt-2 mb-5" style={{ color: colors.inkSoft, lineHeight: 1.5 }}>
-        Found {subjects.length} subjects across {files.length} file{files.length !== 1 ? "s" : ""}. Here's what stands out.
+        Found {plan.topics.length} topic{plan.topics.length !== 1 ? "s" : ""} across {files.length} file{files.length !== 1 ? "s" : ""}. Here's what stands out.
       </p>
 
-      <SectionLabel>Topics you're weakest on</SectionLabel>
+      <SectionLabel>Topics found in your files</SectionLabel>
       <div className="flex flex-col gap-2 mb-5">
-        {weakTopics.slice(0, 3).map((t) => (
+        {plan.topics.slice(0, 3).map((topic) => (
           <div
-            key={t.subjectId + t.name}
+            key={topic}
             className="flex items-center justify-between rounded-xl px-3.5 py-2.5"
             style={{ background: colors.card, border: `1px solid ${colors.border}` }}
           >
@@ -1838,23 +2377,20 @@ function OnboardingScreen({ onComplete }) {
               <Target size={14} color={colors.brick} />
               <div>
                 <p className="text-sm" style={{ color: colors.ink, fontWeight: 500 }}>
-                  {t.name}
+                  {topic}
                 </p>
                 <p className="text-xs" style={{ color: colors.inkSoft }}>
-                  {t.subject}
+                  From uploaded material
                 </p>
               </div>
             </div>
-            <span className="text-xs" style={{ color: colors.brick, fontWeight: 600 }}>
-              {t.mastery}%
-            </span>
           </div>
         ))}
       </div>
 
       <SectionLabel>Your daily plan is ready</SectionLabel>
       <div className="flex flex-col gap-2 mb-6">
-        {dailyTasksSeed.slice(0, 3).map((t) => (
+        {plan.dailyTasks.slice(0, 3).map((t) => (
           <div
             key={t.id}
             className="flex items-center gap-2.5 rounded-xl px-3.5 py-2.5"
@@ -1874,7 +2410,7 @@ function OnboardingScreen({ onComplete }) {
       </div>
 
       <button
-        onClick={onComplete}
+        onClick={() => onComplete(plan)}
         className="text-sm rounded-full py-3 flex items-center justify-center gap-2"
         style={{ background: colors.emerald, color: "#fff", fontWeight: 600 }}
       >
@@ -1886,74 +2422,155 @@ function OnboardingScreen({ onComplete }) {
 }
 
 export default function AIStudentOS() {
-  const [accounts, setAccounts] = useState([{ name: student.name, email: "aisha.k@student.edu", password: "student123" }]);
+  const [accounts, setAccounts] = useState(defaultAccounts);
   const [currentUser, setCurrentUser] = useState(null);
+  const [userPlan, setUserPlan] = useState(null);
+  const [studyAttendanceDates, setStudyAttendanceDates] = useState([]);
   const [phase, setPhase] = useState("login");
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState("home");
   const [selectedSubject, setSelectedSubject] = useState(null);
 
+  const markStudyAttendance = async (email) => {
+    const today = localDateKey();
+    try {
+      const saved = await appStorage.get(studyAttendanceStorageKey(email));
+      const previous = saved?.value ? JSON.parse(saved.value) : null;
+      const dates = Array.isArray(previous) ? previous : previous?.date ? [previous.date] : [];
+      const nextDates = [...new Set([today, ...dates])].sort().slice(-90);
+      setStudyAttendanceDates(nextDates);
+      await appStorage.set(studyAttendanceStorageKey(email), JSON.stringify(nextDates));
+    } catch (e) {
+      console.error("Study attendance storage error:", e);
+      setStudyAttendanceDates([today]);
+    }
+  };
+
   useEffect(() => {
-    let acc = [{ name: student.name, email: "aisha.k@student.edu", password: "student123" }];
-    try {
-      const stored = localStorage.getItem("aiStudentOS_accounts");
-      if (stored) acc = JSON.parse(stored);
-      else localStorage.setItem("aiStudentOS_accounts", JSON.stringify(acc));
-    } catch (e) {
-      console.error("Storage error:", e);
-    }
-    setAccounts(acc);
-
-    let sessionEmail = null;
-    try {
-      sessionEmail = localStorage.getItem("aiStudentOS_session");
-    } catch (e) {
-      sessionEmail = null;
-    }
-
-    if (sessionEmail) {
-      const match = acc.find((a) => a.email.toLowerCase() === sessionEmail.toLowerCase());
-      if (match) {
-        setCurrentUser(match);
-        setPhase("app");
-        setLoading(false);
-        return;
+    let cancelled = false;
+    (async () => {
+      let acc = defaultAccounts;
+      let needsAccountSave = false;
+      try {
+        const res = await appStorage.get("accounts");
+        if (res && res.value) {
+          const storedAccounts = JSON.parse(res.value);
+          if (Array.isArray(storedAccounts)) acc = storedAccounts;
+          else needsAccountSave = true;
+        } else {
+          needsAccountSave = true;
+        }
+      } catch (e) {
+        needsAccountSave = true;
       }
-    }
-    setPhase("login");
-    setLoading(false);
+      if (needsAccountSave) {
+        try {
+          await appStorage.set("accounts", JSON.stringify(acc));
+        } catch (e) {
+          console.error("Storage error:", e);
+        }
+      }
+      if (cancelled) return;
+      setAccounts(acc);
+      await Promise.all(acc.map(saveAccountRecord));
+
+      let sessionEmail = null;
+      try {
+        const s = await appStorage.get("session");
+        if (s && s.value) sessionEmail = s.value;
+      } catch (e) {
+        sessionEmail = null;
+      }
+
+      if (cancelled) return;
+      if (sessionEmail) {
+        const match = acc.find((a) => a.email.toLowerCase() === sessionEmail.toLowerCase());
+        if (match) {
+          let restoredPlan = null;
+          try {
+            const savedPlan = await appStorage.get(planStorageKey(match.email));
+            if (savedPlan?.value) {
+              restoredPlan = JSON.parse(savedPlan.value);
+              setUserPlan(restoredPlan);
+            }
+          } catch (e) {
+            console.error("Plan storage error:", e);
+          }
+          try {
+            const savedStudyAttendance = await appStorage.get(studyAttendanceStorageKey(match.email));
+            if (savedStudyAttendance?.value) {
+              const savedDates = JSON.parse(savedStudyAttendance.value);
+              setStudyAttendanceDates(Array.isArray(savedDates) ? savedDates : savedDates?.date ? [savedDates.date] : []);
+            }
+          } catch (e) {
+            console.error("Study attendance storage error:", e);
+          }
+          await markStudyAttendance(match.email);
+          setCurrentUser(match);
+          setPhase("app");
+          setLoading(false);
+          return;
+        }
+      }
+      setPhase("login");
+      setLoading(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const addAccount = (acc) => {
     setAccounts((prev) => {
       const next = [...prev, acc];
-      try {
-        localStorage.setItem("aiStudentOS_accounts", JSON.stringify(next));
-      } catch (e) {
-        console.error("Storage error:", e);
-      }
+      appStorage.set("accounts", JSON.stringify(next)).catch((e) => console.error("Storage error:", e));
       return next;
     });
+    saveAccountRecord(acc);
   };
 
-  const handleLogin = (account) => {
+  const handleLogin = async (account) => {
     setCurrentUser(account);
-    setPhase("onboarding");
+    saveAccountRecord(account);
+    appStorage.set("session", account.email).catch((e) => console.error("Storage error:", e));
+    await markStudyAttendance(account.email);
+    let hasSavedPlan = false;
+    let savedPlanData = null;
     try {
-      localStorage.setItem("aiStudentOS_session", account.email);
+      const savedPlan = await appStorage.get(planStorageKey(account.email));
+      if (savedPlan?.value) {
+        savedPlanData = JSON.parse(savedPlan.value);
+        setUserPlan(savedPlanData);
+        hasSavedPlan = true;
+      }
     } catch (e) {
-      console.error("Storage error:", e);
+      console.error("Plan storage error:", e);
     }
+    if (!hasSavedPlan) setUserPlan(null);
+    setPhase(hasSavedPlan ? "app" : "onboarding");
   };
+
+  const handlePlanComplete = (plan) => {
+    if (plan) {
+      setUserPlan(plan);
+      appStorage.set(planStorageKey(currentUser.email), JSON.stringify(plan)).catch((e) => console.error("Plan storage error:", e));
+    }
+    setPhase("app");
+  };
+
+  const handleUpdatePlan = (nextPlan) => {
+    setUserPlan(nextPlan);
+    appStorage.set(planStorageKey(currentUser.email), JSON.stringify(nextPlan)).catch((e) => console.error("Plan storage error:", e));
+  };
+
+  const handleStartPlanUpdate = () => setPhase("onboarding");
 
   const handleLogout = () => {
     setCurrentUser(null);
+    setUserPlan(null);
+    setStudyAttendanceDates([]);
     setPhase("login");
-    try {
-      localStorage.removeItem("aiStudentOS_session");
-    } catch (e) {
-      console.error("Storage error:", e);
-    }
+    appStorage.delete("session").catch((e) => console.error("Storage error:", e));
   };
 
   const changeTab = (t) => {
@@ -1976,10 +2593,10 @@ export default function AIStudentOS() {
   ];
 
   return (
-    <div className="w-full min-h-screen flex items-center justify-center p-6" style={{ background: "#DCDEDA" }}>
+    <div className="app-stage w-full min-h-screen flex items-center justify-center p-6" style={{ background: "#DCDEDA" }}>
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&family=Inter:wght@400;500;600&display=swap');`}</style>
       <div
-        className="w-full relative overflow-hidden flex flex-col"
+        className="app-frame w-full relative overflow-hidden flex flex-col"
         style={{
           maxWidth: 390,
           height: 780,
@@ -1989,7 +2606,7 @@ export default function AIStudentOS() {
           fontFamily: "Inter, sans-serif",
         }}
       >
-        <div style={{ height: 34 }} />
+        <div className="app-safe-top" />
         {loading && (
           <div className="flex-1 flex flex-col items-center justify-center">
             <Loader2 size={24} color={colors.emerald} className="animate-spin" />
@@ -1998,25 +2615,32 @@ export default function AIStudentOS() {
         {!loading && phase === "login" && (
           <LoginScreen accounts={accounts} addAccount={addAccount} onLogin={handleLogin} />
         )}
-        {!loading && phase === "onboarding" && <OnboardingScreen onComplete={() => setPhase("app")} />}
+        {!loading && phase === "onboarding" && <OnboardingScreen onComplete={handlePlanComplete} />}
         {!loading && phase === "app" && (
           <>
-            <div className="flex-1 overflow-y-auto px-5 pb-4">
-              {tab === "home" && <HomeScreen goToSubject={goToSubject} goToTab={changeTab} userName={currentUser?.name} />}
-              {tab === "planner" && <PlannerScreen />}
+            <div className="app-content flex-1 overflow-y-auto px-5 pb-4">
+              {tab === "home" && <HomeScreen goToSubject={goToSubject} goToTab={changeTab} userName={currentUser?.name} plan={userPlan} />}
+              {tab === "planner" && (
+                <PlannerScreen
+                  plan={userPlan}
+                  onUpdatePlan={handleUpdatePlan}
+                  studyAttendanceDates={studyAttendanceDates}
+                />
+              )}
               {tab === "subjects" &&
                 (selectedSubject ? (
                   <SubjectDetail subjectId={selectedSubject} back={() => setSelectedSubject(null)} />
                 ) : (
-                  <SubjectsList goToSubject={goToSubject} />
+                  <SubjectsList goToSubject={goToSubject} plan={userPlan} />
                 ))}
-              {tab === "progress" && <ProgressScreen />}
+              {tab === "progress" && <ProgressScreen plan={userPlan} />}
               {tab === "assistant" && <AssistantScreen />}
               {tab === "profile" && (
                 <ProfileScreen
                   userName={currentUser?.name}
                   userEmail={currentUser?.email}
                   onLogout={handleLogout}
+                  onUpdatePlan={handleStartPlanUpdate}
                 />
               )}
             </div>
